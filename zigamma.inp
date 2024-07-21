@@ -1,0 +1,103 @@
+include basis_functions.gfn
+
+# calcolo parametri inziali
+function matrix parm_init(series x)
+    purged = x == 0 ? NA : x
+    m = mean(purged)
+    v = var(purged)
+    
+    thetahat = m/v
+    khat = m * thetahat
+    
+    return {-log(thetahat); khat}
+end function
+
+# funzione gamma
+function series gldens(series x, scalar k, series theta)
+    series ret = k * log(theta) - lngamma(k) + (k-1) * log(x) - x*theta
+    return x>0 ? ret : 0
+end function
+     
+# funzione di quasi massima verosimiglianza
+function series llik(matrix parm, series x, list X, list Z)
+    k1 = nelem(X)
+    k2 = nelem(Z)
+    
+    coeff_arm = parm[1:k1]
+    g = parm[k1 + 1: k1 + k2]
+    k = parm[k1 + k2 + 1]
+    series ndx1 = lincomb(X, coeff_arm)
+    series theta = exp(lincomb(Z, -g))
+    
+    prob = logistic(ndx1)
+    
+    ret = x == 0 ? log(1-prob) : log(prob) + gldens(x, k, theta)
+    return ret
+end function
+
+# creazione del dataset con le osservazioni dal 01/01/1872 al 31/12/2023
+nulldata 55517 --preserve
+setobs 7 1872-01-01 --time-series
+
+open dsn=precipitazioniISO --odbc
+
+# si importano i dati dal database
+string q = sprintf("select substr(data,1,4), substr(data,5,2), substr(data,7,2), precipitazioni from precipitazioni where id_stazione=%d", scriptopt)
+data rain obs-format="%d-%d-%d" query=q --odbc
+
+# si crea un tempo unico per tutti gli script
+# in modo da rendere confrontabili i coeff di fourier
+dayStart = epochday(1872,1,1)
+tt = (epochday($obsmajor, $obsminor, $obsmicro) - dayStart) / 365.25
+
+# si crea la lista della base di Fourier da 1 a 12
+FOU = fourier(12, 365.25)
+
+# eliminazione le osservazioni mancanti
+smpl rain --no-missing
+
+# creazione le matrici X e Z
+list X = const tt FOU
+list Z = const tt FOU[1:4]
+kx = nelem(X)
+kz = nelem(Z)
+
+# creazione la serie binaria wet con i giorni di precipitazione
+wet = rain > 0
+
+# si esegue la regressione logistica e assegno a gamma1 i coeff
+logit wet X --p-values
+gamma1 = $coeff
+
+# creazione starting point
+gamma_pars = parm_init(rain)
+gamma2 = gamma_pars[1] | zeros(kz-1,1)
+k = gamma_pars[2]
+
+# creazione un vettore da passare alla funzione llik
+llik_pars = gamma1 | gamma2 | k
+
+# viene eseguita la funzione di quasi massima verosimiglianza
+mle ll = llik(llik_pars, rain, X, Z)
+    params llik_pars
+end mle --quiet --robust
+
+gamma1 = llik_pars[1:kx]
+gamma2 = llik_pars[kx+1:kx+kz]
+k = llik_pars[kx+kz+1]
+
+# calcolo delle p
+prob_rain = logistic(lincomb(X, gamma1))
+
+# calcolo dei theta
+theta_t =  exp(lincomb(Z, gamma2)) 
+
+# salvataggio dei dati
+path = "path/to/file"
+outfile @path --quiet
+    printf("%d;", scriptopt)
+    loop i = 1 .. nelem(gamma) - 1
+        printf("%g;", gamma[i])
+    endloop 
+    printf("%g", gamma[nelem(gamma)])
+end outfile
